@@ -106,3 +106,40 @@ score_bchX=150
 # Translate OTU representative sequences into protein sequences
 /mnt/home/kristybr/anaconda3/pkgs/rdptools-2.0.2-1/bin/FrameBot framebot -N -l 30 -i 0.4 -o ./nifH/ /mnt/home/kristybr/Framebot/refset/nifh_prot_ref.fasta otus.fa 
 ```
+
+```{Filter out homologous genes (bchL; chlL; bchX; parA) using HMM:}
+# Corrected AA sequences are in _corr_prot.fasta
+# Screen with hmm to identify all hits
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
+
+hmmscan --cpu 16  --domtblout hmmOut2.out /mnt/home/kristybr/NifMAP/Resources/NifH_ChlL_bchX.hmm ./nifH/_corr_prot.fasta
+
+
+cat hmmOut2.out | awk 'NR>3{if($8>bitarray[$4]){bitarray[$4]=$8;outArray[$4]=$1"\t"$4}}END{for(entry in outArray){print outArray[entry]}}' > assignments.txt
+
+
+
+grep "nifH" assignments.txt | awk '{print $2}' | sort > acceptable_hits
+grep ">" ./nifH/_corr_nucl.fasta | awk '{print $1}' | grep -v -F -f acceptable_hits | sed 's/>//'> shitHits
+totalOTUs=grep ">" ./nifH/_corr_nucl.fasta | wc -l
+totalAccepted=cat acceptable_hits | wc -l
+totalRemoved=cat shitHits | wc -l
+echo "FRAMEBOT and hmmscreen of nifH removed ${totalRemoved} sequences out of ${totalOTUs} ASVs. ${totalAccepted} ASV reps retained"
+
+
+#mv ${RESULTSFOLDER}/${inputReads} ${WORKFOLDER}/${inputReads}
+cat ./nifH/_corr_nucl.fasta | sed 's/ //g' | awk 'BEGIN{RS=">";FS="\n"};NR>1{printf $1"_\t";for(i=2;i<=NF;i++){printf($i)}print("")}' | grep -F -f acceptable_hits | awk '{gsub("_$","",$1);print(">"$1"\n"$2)}' > nifH_corr_nucl_only_nifH.fasta
+cat ./nifH/_corr_prot.fasta | sed 's/ //g' |  awk 'BEGIN{RS=">";FS="\n"};NR>1{printf $1"_\t";for(i=2;i<=NF;i++){printf($i)}print("")}' | grep -F -f acceptable_hits | awk '{gsub("_$","",$1);print(">"$1"\n"$2)}' > nifH_corr_prot.fasta
+cat ${WORKFOLDER}/nifH_corr_prot.fasta | sed 's/ //g' |  awk 'BEGIN{RS=">";FS="\n"};NR>1{printf $1"_\t";for(i=2;i<=NF;i++){printf($i)}print("")}' | grep -F -f shitHits | awk '{gsub("_$","",$1);print(">"$1"\n"$2)}' > nifH_rej_prot.fasta
+```
+
+```{Construct OTU table based on filtered, corrected sequences}
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
+
+# Make an OTU table based on filter corrected seqs
+/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -otutab ./merged//merged_reads.fa -otus nifH_corr_nucl_only_nifH.fasta -otutabout otu_table.txt -mapout map.txt -threads 16
+
+
+
+
+```
