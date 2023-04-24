@@ -1,0 +1,108 @@
+---
+title: "NifH_pipeline"
+output: html_document
+date: "2023-04-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{bash}
+#load anaconda
+module load Conda/3
+#activate qiime2
+conda activate qiime2-2023.2
+```
+
+```{seq visualization w QIIME2}
+Import demultiplexed sequences into .qza artifact for QIIME2-related scripts:
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250/
+
+qiime tools import 
+--type 'SampleData[PairedEndSequencesWithQuality]' \
+--input-path 20230410_Amplicon_KRI13538_PE250_manifest.txt/ \
+--input-format PairedEndFastqManifestPhred33V2 \
+--output-path 20230410_Amplicon_KRI13538_PE250.qza \
+
+# Visualize quality of raw, demultiplexed sequences. The .qzv file is available in this repository. 
+
+qiime demux summarize \
+--i-data 20230410_Amplicon_KRI13538_PE250.qza \
+--o-visualization 20230410_Amplicon_KRI13538_PE250_SUMMARY_VIZ.qzv
+```
+
+
+```{merge sequences via USEARCH}
+# Merge paired-end fastq sequences using usearch
+for i in *R1*.fastq; do
+  /mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64  \
+  -fastq_mergepairs $i \
+  -fastqout merged_reads_${i}\
+  -sample $i
+done
+
+# Concatenate all merged reads into one file
+cat *merged_reads* > /merged/merged_reads.fastq
+
+# Remove intermediate merge files
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250/
+rm *merged_reads*
+```
+
+```{seq_filter via USEAARCH}
+# Filter merged fastq sequences: Sequences were quality and length filtered to maximum expected errors of 1 and minimum length of 380bp 
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250/merged
+
+/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64  \
+-fastq_filter merged_reads.fastq \
+-fastq_trunclen 380 
+-fastq_maxee 1.0 \
+-fastaout merged_reads_filtered.fa
+```
+
+```{Homolog removal}
+# Screen merged, filtered reads using HMMER
+hmmsearch --domtblout hmmOut1.out /mnt/home/kristybr/NifMAP/Resources/hmm_nuc_1160_nifH.hmm ./merged/merged_reads_filtered.fa
+
+# Identify acceptable and shit hits 
+awk '{print $1}' hmmOut1.out | grep -v "#" > acceptable_hits
+grep ">" ./merged/merged_reads_filtered.fa | grep -v -F -f acceptable_hits > shit_hits
+totalUnique = `grep ">" ./merged/merged_reads_filtered.fa | wc - l`
+totalAccepted = `cat acceptable_hits | wc -l`
+totalRemoved = `cat shit_hits | wc -l`
+
+# Filter out unacceptable reads from merged_reads_filtered.fa
+awk 'BEGIN{FS="\n";RS=">"};NR>1{print(">"$1);for(i=2;i<=NF;i++){printf($i)};print("")}' ./merged/merged_reads_filtered.fa | grep -A 1 -F -f acceptable_hits | grep -v "^\-\-$" > ./merged/merged_reads_filtered_hmm.fa
+
+```
+
+```{OTU generation}
+# First, dereplicate the sequences
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
+
+/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -fastx_uniques ./merged/merged_reads_filtered_hmm.fa \
+-minuniquesize 2 
+-fastaout ./merged/unique.fa 
+
+# Second, sort unique sequences by length
+/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -sortbylength ./merged/unique.fa \
+-fastout ./merged/unique_sorted.fa
+
+# Third, cluster sequences into OTUs at 97% similarity
+/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -cluster_fast ./merged/unique_sorted.fa \
+-id 0.97 \
+-centroids otus.fa \
+-uc clusters.uc
+```
+
+```{OTU representative seq translation with Framebot}
+cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
+eVal_chL=1e-50
+score_chL=150
+eVal_bchX=1e-50
+score_bchX=150
+
+# Translate OTU representative sequences into protein sequences
+/mnt/home/kristybr/anaconda3/pkgs/rdptools-2.0.2-1/bin/FrameBot framebot -N -l 30 -i 0.4 -o ./nifH/ /mnt/home/kristybr/Framebot/refset/nifh_prot_ref.fasta otus.fa 
+```
