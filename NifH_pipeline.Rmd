@@ -112,9 +112,14 @@ score_bchX=150
 # Screen with hmm to identify all hits
 cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
 
-hmmscan --cpu 16  --domtblout hmmOut2.out /mnt/home/kristybr/NifMAP/Resources/NifH_ChlL_bchX.hmm ./nifH/_corr_prot.fasta
+# First - press the homolog hmm prior to running hmmscan - code will not run unless you do this
+cd /mnt/home/kristybr/NifMAP/Resources/
+hmmpress nifH_chlL_bchX.hmm
 
+# Now run hmmscan
+hmmscan --cpu 16  --domtblout hmmOut2.out /mnt/home/kristybr/NifMAP/Resources/nifH_chlL_bchX.hmm ./nifH/_corr_prot.fasta
 
+# Filter out homologous sequences
 cat hmmOut2.out | awk 'NR>3{if($8>bitarray[$4]){bitarray[$4]=$8;outArray[$4]=$1"\t"$4}}END{for(entry in outArray){print outArray[entry]}}' > assignments.txt
 
 
