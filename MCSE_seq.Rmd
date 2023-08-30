@@ -1,0 +1,1655 @@
+---
+title: "Diazotroph Biodiversity Analysis from the LTER MCSE"
+output: html_document
+date: "2023-05-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+# MAC OS
+knitr::opts_knit$set(root.dir = "~/Dropbox/LTER_MCSE/data/seq_data")
+
+# WINDOWS OS
+#knitr::opts_knit$set(root.dir = 'C:/Users/Brand/Dropbox/LTER_MCSE/data/seq_data')
+
+
+
+library(bbmle)
+library(cowplot)
+library(data.table)
+library(DESeq2)
+library(doParallel)
+library(ggplot2)
+library(ggpubr)
+library(hillR)
+library(indicspecies)
+library(knitr)
+library(lazyeval)
+library(metacoder)
+library(multcompView)
+library(pander)
+library(permute)
+library(phyloseq)
+library(plyr)
+library(lattice)
+library(magrittr)
+library(microbiome)
+library(MetBrewer)
+library(nlme)
+library(parallel)
+library(reshape2)
+library(tidyverse)
+library(vegan)
+
+```
+### Brandon D. Kristy
+
+## Overview
+<div align="justify"> The following report outlines the sequencing results from the nifH library that I prepped for the LTER Main Cropping System Experiment dataset. Jaime Davidson collected soil samples from the following MCSE treatments in both the Summer (08/22) and Fall (11/22): \
+* T1: Conventional Corn/Soybean/Wheat (n=4) \
+* T3: Reduced Input Corn/Soybean/Wheat (n=4) \
+* T4: Biologically-based Corn/Soybean/Wheat (n=4) \
+* T5: Poplar Polyculture (n=4) \
+* T7: Early Successional Community (n=3) \
+* CF: Coniferious Forest (n=3) \
+* DF: Deciduous Forest (n=3) \
+* SF: Successional Forest (n=3) \
+Jaime manipulated biodiversity by subjecting soil subsamples to a chloroform fumigation experiment. Subsamples were fumigated for 0, 24, 48, or 72 hours. As controls, in-situ soil reference cores were sequences for each treatment. In total, there are 145 samples across MCSE treatment, sampling date (Fall vs. Summer), and fumigation time. </div> 
+
+```{r load data, include=FALSE}
+otu_table <- read.csv("otu_table.csv", header=T, row.names = 1)
+otu <- otu_table(otu_table, taxa_are_rows = TRUE)
+
+metadata <- read.csv("sample_metadata.csv", row.names = 1)
+samp <- sample_data(metadata)
+
+# Reformat taxonomy; Remove Unassigned at the Kingdom level
+# 60559 taxa; 55628 were classified 
+tax_table <- read.table("nifH_taxonomy.out", sep = ";")
+
+tax_table <- tax_table %>%
+              subset(select = c(V1, V3)) %>%
+              filter(!grepl('k__unassigned', V3)) %>%
+              mutate(V3=gsub("[a-z]__", "", V3)) %>%
+              separate_wider_delim(V3, delim = "|", names = c("Kingdom","Phylum","Class","Order","Family","Genus","Species")) %>%
+              remove_rownames %>%
+              column_to_rownames(var='V1')
+
+tax_table <- as.matrix(tax_table)
+tax <- tax_table(tax_table)
+
+
+phylo <- merge_phyloseq(otu, samp, tax)
+save(phylo, file = "raw_phyloseq.RData")
+```
+
+```{r N-fix data, include = FALSE}
+n.fix.d <- metadata %>% 
+           filter(!is.na(metadata$n.fix) &
+                    metadata$incubation != "in-situ")
+
+
+
+p <- n.fix.d %>%
+    ggplot(aes(x=treatment, y =n.fix, fill = treatment)) +
+    geom_boxplot() +
+    scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                               '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                       labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                  "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                  "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+    facet_grid(~incubation) +
+    xlab("") +
+    ylab("Nitrogen Fixation Potential (\u00b5g/g)") +
+    theme_bw() +
+    theme(axis.title.x = element_text(size = 10), 
+    axis.title.y = element_text(size = 10), 
+    axis.text.x = element_blank(), 
+    axis.text.y = element_text(size = 10, color = "black"), 
+    legend.text = element_text(size = 10), 
+    legend.title = element_text(size = 10))
+ggsave("n.fix.png", plot = p, dpi = 350, w = 8.5, h =4.5)
+
+
+
+
+
+
+```
+
+## Sequence Processing
+<div align="justify"> First, OTUs that were not classified at the Kingdom level are removed. Second, any OTU that was not classified as 'Bacteria' or 'Archaea' at the Kingdom level are removed. The sequence information post-filtering is found below: </div> 
+```{r filtering, echo = FALSE}
+# Remove Singletons
+otus.mine <- prune_taxa(taxa_sums(phylo) > 1, phylo)
+tax.remove <- ntaxa(phylo) - ntaxa(otus.mine) #0 OTUs removed
+
+# Remove plant contaminants
+bact.p <- subset_taxa(otus.mine, Kingdom != "\tEukaryota")
+
+n.filtered <- ntaxa(otus.mine)- ntaxa(bact.p) # 248 OTUs removed
+
+# remove low sequence coverage samples
+## all samples 
+sorted <- sort(sample_sums(bact.p))  
+min <- min(sample_sums(bact.p)) #49
+max <- max(sample_sums(bact.p)) # 83933
+mean <- mean(sample_sums(bact.p)) #26,402.8
+median <- median(sample_sums(bact.p)) #26601
+
+bact.p_filtered <- prune_samples(sample_sums(bact.p)>=1000, bact.p)
+save(bact.p_filtered, file = "phylo_filtered.RData")
+
+v.1 <- c("Unclassified OTUs Removed", "Empty OTUs Removed", "Singletons Removed", "Plant Contaminants Removed", "Total Prokaryotic OTUs", "Minimum Sequence Count", "Maximum Sequence Count", "Mean Sequence Count", "Median Sequence Count", "Samples Removed (<1000 Reads)")
+v.2 <- c(4931,0,0,248,55380,49,83933,26402.8,26601,3)
+v.3 <- cbind(v.1,v.2)
+kable(v.3, caption = "Sequence Processing Results")
+```
+
+## Read Depth Analysis
+The sequencing depth across samples, post-filtering, is shown below.
+```{r depth, echo = FALSE, fig.height = 8, fig.width = 12}
+sampledata <- as(sample_data(bact.p_filtered), "data.frame")
+sampledata$samplesums <- sample_sums(bact.p_filtered)
+sampledata <- tibble::rownames_to_column(sampledata, "sample")
+
+p1 <- sampledata %>%
+        ggplot(aes(x = sample, y = samplesums, fill = treatment)) +
+        geom_bar(stat = "identity", width = 0.85) + 
+        scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                                    '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                          labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                     "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                     "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+        ylab("Read Number") + 
+        xlab("Sample") +
+        theme_classic() +
+        theme(axis.text.x=element_blank(),  
+              legend.text = element_text(size = 15), 
+              legend.title = element_text(size = 15))
+p1a <- p1 + theme(legend.position="none")
+
+
+
+Observed <- estimate_richness(bact.p_filtered, measures = "Observed")
+Observed <- rownames_to_column(Observed, "sample")
+sampledata <- merge(sampledata, Observed, by = "sample" )
+
+p2 <- sampledata %>%
+        ggplot(aes(x= samplesums, y = Observed)) + 
+        geom_point(aes(fill = treatment),size = 4.5, stroke = 2, pch = 21) +
+        scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                                   '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                          labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                     "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                     "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+        labs(x = "Total Reads", y = "Observed Richness")+
+        theme_classic() +
+        theme(legend.position="none")
+
+p3 <- sampledata %>%
+        ggplot(aes(x=treatment, y= Observed, fill = treatment)) + 
+        geom_boxplot() +  
+        scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                                   '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                          labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                     "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                     "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+        ylab("Observed Richness") +
+        xlab("MCSE Treatment") +
+        theme_bw() +
+        theme(axis.text.x=element_blank()) +
+        theme(legend.position="none")
+
+legend <- get_legend(p1)
+
+plots <- align_plots(p1a, p2, p3, align = 'v', axis = 'l')
+
+top_row <- plot_grid(
+  plots[[1]], legend,
+  labels = c("A", ""),
+  rel_widths = c(1, 0.5),
+  nrow = 1
+)
+
+bottom_row <- plot_grid(
+  plots[[2]], plots[[3]],
+  labels = c("B", "C"),
+  rel_widths = c(1, 1),
+  nrow = 1
+)
+plot_grid(top_row, bottom_row, ncol = 1)
+```
+<div align="justify"> Sequencing depth across each sample is plotted in Figure 1A. We have sufficient sequencing depth (>1,000 reads) across 142 samples. Rarefying our sequencing data to the lowest depth may be punishing. Quite a bit of samples across each treatment have over 40,000 reads. Observed species richness is plotted with sequencing depth and MCSE treatment in Figure 1B and Figure 1C, respectively. We likely achieve saturated species richness above 5,000 reads. Interestingly, the forest experimental plots have lower species richness, on average, relative to the LTER cropping treatments. </div>
+
+## Rarefaction Analysis
+```{r rarefaction, echo=FALSE, fig.height = 8, fig.width = 8}
+bact.tab<-t(as(otu_table(bact.p_filtered), "matrix"))
+
+
+vegan_rarefaction <- rarecurve(bact.tab, step = 100, sample = raremax, col = "blue", cex = 0.6, tidy = TRUE)
+# merge with metadata 
+sam_data <- as(sample_data(bact.p_filtered), "data.frame")
+sam_data <- rownames_to_column(sam_data, "Site")
+
+vegan_rarefaction_m <- merge(vegan_rarefaction, sam_data, by = "Site")
+
+
+vegan_rarefaction_m %>%
+  ggplot(aes(x=Sample, y = Species, col = treatment)) +
+  scale_color_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                    labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  geom_point() +
+  geom_vline(xintercept = 1289, col = 'red') +
+  xlab("Sequencing Depth") +
+  ylab("Species Richness") +
+  theme_classic() +
+  theme(legend.text = element_text(size = 15), 
+        legend.title = element_text(size = 15))
+```
+
+<div align="justify"> A rarefaction plot is shown above. As sequencing depth increases, species richness eventually saturates. The red line indicates the minimum sequencing depth with samples that have at least 1,000 reads. A rarefaction at the minimum depth of 1289 would result in a considerable loss of data. Let's rarefy at several read depths to see how many samples are lost.  </div>
+
+```{r rarefaction_test, eval=FALSE, include=FALSE}
+set.seed(37920) # set this so your data is reproducible
+
+# Min
+bact.rfy1 <- rarefy_even_depth(bact.p_filtered, sample.size = 1289, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy2 <- rarefy_even_depth(bact.p_filtered, sample.size = 2000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy3 <- rarefy_even_depth(bact.p_filtered, sample.size = 3000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy4 <- rarefy_even_depth(bact.p_filtered, sample.size = 4000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy5 <- rarefy_even_depth(bact.p_filtered, sample.size = 5000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy6 <- rarefy_even_depth(bact.p_filtered, sample.size = 6000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy7 <- rarefy_even_depth(bact.p_filtered, sample.size = 8000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy8 <- rarefy_even_depth(bact.p_filtered, sample.size = 10000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy9 <- rarefy_even_depth(bact.p_filtered, sample.size = 15000, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+set.seed(37920)
+bact.rfy10 <- rarefy_even_depth(bact.p_filtered, sample.size = 26400, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+
+rarefaction.depth <- c(1289, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 15000, 26400)
+samples.removed <- c(0,6, 10, 11, 18, 20, 28, 34, 47, 69)
+otus.removed <- c(36530, 32210, 27603, 23942, 21425, 18944, 15510, 13467, 9998, 10196)
+v.3 <- cbind(rarefaction.depth, samples.removed, otus.removed)
+kable(v.3, caption = "Rarefaction Analysis Results")
+
+
+```
+<div align="justify"> At the expense of retaining OTUs, we lose dozens of samples. To retain samples, we will rarefy at a minimum sequencing depth of 1289. We will bootstrap this rarefaction to obtain an average OTU abundance table, iterating the random subsampling of the OTU table 100 times. The results of this rarefaction function on the data are shown here: </div>
+```{r rarefaction_filter, echo = FALSE}
+set.seed(37920)
+bact.rfy <- rarefy_even_depth(bact.p_filtered, sample.size = 1289, replace = FALSE, rngseed = FALSE, verbose = FALSE)
+
+before_rarefaction <- c(55380, 142)
+after_rarefaction <- c(32806, 129)
+names <- c("OTUs", "Total Samples")
+table <- cbind(names,before_rarefaction, after_rarefaction)
+colnames(table)[1] <- ""
+colnames(table)[2] <- "Before Rarefaction"
+colnames(table)[3] <- "After Rarefaction"
+kable(table, caption = "Rarefaction Normalization")
+
+save(bact.rfy, file= "phylo_rarefied.RData")
+```
+
+### Section 1: Phylogenetic Overview of Diazotroph Taxonomy
+<div align = "justify"> I determined the taxonomy of frameshift-corrected, homolog-filtered NifH sequenced using a K-mer based, Least-Common Ancestor (LCA) algorithm. We leveraged the Kraken2 algorithm with NCBI's nt database. The full taxonomic overview of the NifH OTUs are presented below: </div>
+```{r heat_tree, echo = FALSE, fig.height =8, fig.width = 8}
+tax <- as.data.frame(bact.rfy@tax_table)
+tax <- subset(tax, select = -c(Species))
+tax$lineage <- paste0("r__Root;k__", tax$Kingdom, 
+                             ";p__", tax$Phylum, 
+                             ";c__", tax$Class, 
+                             ";o__", tax$Order,
+                             ";f__", tax$Family,
+                             ";g__", tax$Genus)
+
+obj <- parse_tax_data(tax,
+                      class_cols = "lineage", # the column that contains taxonomic information
+                      class_sep = ";", # The character used to separate taxa in the classification
+                      class_regex = "^(.+)__(.+)$", # Regex identifying where the data for each taxon is
+                      class_key = c(tax_rank = "info", # A key describing each regex capture group
+                                    tax_name = "taxon_name"))
+
+# Create heat tree 
+
+
+obj %>%
+  heat_tree(node_label = taxon_names,
+            node_color = n_obs,
+            initial_layout = "re", layout = "da", 
+            node_color_axis_label = "Number of OTUs")
+
+
+
+```
+
+### Section 2: Evaluating MCSE Treatment Effects Prior to Fumigation: In-tact Soil Cores
+<div align = "justify"> In this section, we will evaluate LTER treatment-specific effects on soil samples that were not fumigated. This will include both Fall and Summer 0-hour and in-situ reference samples. We will look at alpha diversity, beta diversity, taxonomic composition, and differential abundance. </div> 
+```{r alpha_diversity_MCSE, echo = FALSE, fig.height= 8, fig.width= 12}
+bact_mcse <- subset_samples(bact.rfy, incubation == "in-situ")
+
+
+# Calculate Shannon Diversity
+otu_table <- t(as(bact_mcse@otu_table, "matrix"))
+otu_table <- as.data.frame(otu_table)
+
+shan <- hill_taxa(otu_table, q = 1)
+shan <- merge(bact_mcse@sam_data, shan, by = 0)
+
+
+colnames(shan)[colnames(shan) == "y"] ="shan"
+# Create a linear model
+mod <- lm(shan ~ treatment + sample_date, data = shan)
+mod.aov <- aov(shan ~ treatment * sample_date, data = shan)
+
+tHSD <- TukeyHSD(mod.aov, ordered = FALSE, conf.level = 0.95)
+
+letters.df <- data.frame(multcompLetters(TukeyHSD(aov(shan ~ treatment, data = shan))$treatment[,4])$Letters)
+colnames(letters.df)[1] <- "Letter" #Reassign column name
+letters.df$treatment <- rownames(letters.df) 
+
+placement <- shan %>%
+  group_by(treatment) %>%
+  summarise(quantile(shan)[4])
+
+colnames(placement)[2] <- "Placement.Value"
+letters.df <- left_join(letters.df, placement)
+
+
+# Plot the data with linear model predictions
+shan %>%
+  ggplot(aes(x=treatment, y = shan, fill = treatment)) +
+  facet_grid(~sample_date) +
+  geom_boxplot(alpha = 0.85) +
+  geom_jitter(width = 0.1) +
+  #geom_text(data = letters.df, aes(x=treatment, y=Placement.Value, label=Letter), 
+            #size =4, color="black", hjust= 0.75,
+            #vjust=-6.5, fontface="bold") +
+  scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  ylab("Shannon Diversity") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 10), 
+  axis.title.y = element_text(size = 10), 
+  axis.text.x = element_blank(), 
+  axis.text.y = element_text(size = 10, color = "black"), 
+  legend.text = element_text(size = 10), 
+  legend.title = element_text(size = 10))
+
+summary(mod)
+summary(mod.aov)
+print(tHSD)
+
+shan$treatment <- factor(shan$treatment, levels = c("T1", "T3", "T4", "T5", "T7", "SF", "DF", "CF"))
+shan$system <- factor(shan$system, levels = c("annual", "perennial", "forest"))
+shan <- shan %>%
+  subset(sample_date == "summer")
+
+
+mod.aov <- aov(shan ~ treatment, data = shan)
+
+tHSD <- TukeyHSD(mod.aov, ordered = FALSE, conf.level = 0.95)
+
+letters.df <- data.frame(multcompLetters(TukeyHSD(aov(shan ~ treatment, data = shan))$treatment[,4])$Letters)
+colnames(letters.df)[1] <- "Letter" #Reassign column name
+letters.df$treatment <- rownames(letters.df) 
+letters.df$placement <- c(475, 475, 475, 475, 475, 475, 475, 475)
+
+
+
+esa_p1 <- shan %>%
+  ggplot(aes(x=treatment, y = shan, fill = treatment)) +
+  geom_boxplot(alpha = 0.90, outlier.shape = NA) +
+  geom_jitter(width = 0.1) +
+  facet_grid(.~system, drop = TRUE, space = "free", scales = "free") +
+  scale_fill_manual(values=c('#EEAC4E','#D7785D','#9C7C50', '#577753',
+                             '#1A4C76','#86A592','#577B96','#B0381D'), name = "MCSE Treatment",
+                     labels = c("T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional",
+                                "SF: Successional Forest", "DF: Deciduous Forest", "CF: Coniferous Forest")) +
+  ylab("Shannon Diversity") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 10), 
+  axis.title.y = element_text(size = 10), 
+  axis.text.y = element_text(size = 10, color = "black"), 
+  legend.text = element_text(size = 10), 
+  legend.title = element_text(size = 10))
+ggsave("esa_p1.png", plot = esa_p1, dpi = 350, w = 8, h = 5)
+
+mod.aov <- aov(shan ~ system, data = shan)
+
+tHSD <- TukeyHSD(mod.aov, ordered = FALSE, conf.level = 0.95)
+
+letters.df <- data.frame(multcompLetters(TukeyHSD(aov(shan ~ system, data = shan))$system[,4])$Letters)
+colnames(letters.df)[1] <- "Letter" #Reassign column name
+letters.df$system <- rownames(letters.df) 
+letters.df$placement <- c(475, 475, 475)
+
+  
+esa_p2 <- shan %>%
+  ggplot(aes(x=system, y = shan, fill = system)) +
+  geom_boxplot(alpha = 0.85, outlier.shape = NA) +
+  geom_jitter(width = 0.1) +
+  scale_fill_manual(values=met.brewer("Kandinsky", 3), name = "System") +
+  geom_text(data = letters.df, aes(x=system, y=placement, label=Letter), 
+            size =6, color="black", fontface="bold") +
+  ylab("Shannon Diversity") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 14), 
+  axis.title.y = element_text(size = 14), 
+  axis.text.x = element_text(size=12), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 14))
+
+ggsave("esa_p2.png", plot = esa_p2, dpi = 350, w = 5, h = 5)
+  
+```
+<div align = "justify"> When evaluating non-fumigated samples, species alpha diversity significantly varies across MCSE treatment (p < 0.001) and sampling date  (p = 0.013). The lowest alpha diversity was found to be in the coniferous forest soil samples at 99.42 (95% CI: 34.43 - 164.51; p < 0.0032). The highest alpha diversity was found to be in the T4: Biologically Based Agroecosystem at 348.15 (95% CI: 295.09 - 401.21; p < 0.001). The second highest group for alpha diversity included T1: Conventional Corn/Soy/Wheat and T3: Reduced Input Corn/Soy/Wheat. Both perennial sites, T5:Poplar and T7: Early Successional had comparable shannon diversity values to both the deciduous forest and successional forests. On average, the forested sites had lower diazotroph biodiversity relative to the agroecosystem sites, which is worth further exploring below via differential abundance. On average, Summer samples across all MCSE treatments had lower alpha diversity than fall treatments. </div>
+
+```{r silent_ordination_2, include = FALSE}
+set.seed(37920)
+bact.mcse.rel <- transform_sample_counts(bact_mcse, function(x) x / sum(x) )
+bray.NMDS.mcse <- ordinate(bact.mcse.rel, method = "NMDS", distance = "bray")
+
+
+```
+
+```{r beta_diversity_MCSE, echo = FALSE, fig.height= 8, fig.width= 12}
+# extract out x and y dimensions from ordination 
+bray.points <- as.data.frame(bray.NMDS.mcse$points)
+bray.points <- rownames_to_column(bray.points, "sample")
+
+sam_data <- as(sample_data(bact.mcse.rel), "data.frame")
+sam_data <- rownames_to_column(sam_data, "sample")
+
+bray.points.m <- merge(bray.points, sam_data, by = "sample")
+
+# PLOT ordination
+bray.points.m %>%
+  ggplot(aes(x=MDS1,y=MDS2)) +
+  geom_point(aes(fill = treatment, shape = sample_date), size = 4.75) +
+  scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  scale_shape_manual(values =c(21, 22)) +
+  guides(fill = guide_legend(override.aes = list(shape=c(21, 22)))) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 15)) + 
+  theme(axis.title.y = element_text(size = 15)) + 
+  theme(axis.text.x = element_text(size = 10, color = "black"))  + 
+  theme(axis.text.y = element_text(size = 10, color = "black"))  + 
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=2))+
+  theme(legend.text = element_text(size = 10)) + 
+  theme(legend.position="right", legend.title=element_text(size=10))+
+  theme(legend.position="right")
+
+# permANOVA
+set.seed(37920)
+bray.NMDS.mcse <- phyloseq::distance(bact.mcse.rel,"bray")
+set.seed(37920)
+permanova <- adonis(bray.NMDS.mcse~sample_data(bact.mcse.rel)$treatment + 
+                    sample_data(bact.mcse.rel)$sample_date, permutations = 9999, method = "bray")
+permanova["aov.tab"]
+```
+<div align = "justify"> Diazotroph community composition is significantly influenced by both sample date and MCSE treatment. MCSE treatment explained 21.12% of the variation in diazotroph community composition (R2 = 0.21115; p < 0.05; Bray-Curtis Dissimilarity). Sampling data explained only 4.5% of the variation in diazotroph community composition (R2 = 0.04551; p <0.05; Bray-Curtis Dissimilarity). We can visualizedthese compositional differences in the NMDS ordination of Bray-curtis dissimilarity above. Specifically, the Fall coniferous forest (CF), deciduous forest (DF), and successional forest (SF) data points are clustering out to the left of the X-axis. Further, all MCSE summer and fall samples are clustered together to the right of the X-axis. Below the Y-axis, T1, T3, and T4 samples cluster together. Above the Y-axis, the T5 and T7 samples cluster together. This indicates that the annual agroecosystems harbor a distinct diazotroph community relative to the perennial systems; the forested agroecosystems remain an outlier in the entire design. Let's look at the taxonomic composition of dominant genera. </div>
+
+```{r n-fix_MCSE, echo = FALSE, fig.height = 8, fig.width =12}
+mod <- lm(n.fix ~ treatment + sample_date, data = shan)
+mod.aov <- aov(n.fix ~ treatment * sample_date, data = shan)
+
+shan %>%
+    ggplot(aes(x=treatment, y = n.fix, fill = treatment)) +
+  facet_grid(~sample_date) +
+  geom_boxplot(alpha = 0.85) +
+  geom_jitter(width = 0.1) +
+  scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  ylab("Shannon Diversity") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 10), 
+  axis.title.y = element_text(size = 10), 
+  axis.text.x = element_blank(), 
+  axis.text.y = element_text(size = 10, color = "black"), 
+  legend.text = element_text(size = 10), 
+  legend.title = element_text(size = 10))
+
+summary(mod)
+summary(mod.aov)
+
+
+esa_p3 <- shan %>%
+  ggplot(aes(x=treatment, y = n.fix, fill = treatment)) +
+  geom_boxplot(alpha = 0.90, outlier.shape = NA) +
+  geom_jitter(width = 0.1) +
+  facet_grid(.~system, drop = TRUE, space = "free", scales = "free") +
+  scale_fill_manual(values=c('#EEAC4E','#D7785D','#9C7C50', '#577753',
+                             '#1A4C76','#86A592','#577B96','#B0381D'), name = "MCSE Treatment",
+                     labels = c("T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional",
+                                "SF: Successional Forest", "DF: Deciduous Forest", "CF: Coniferous Forest")) +
+  ylab("Nitrogen Fixation Potential (\u00b5g/g soil)") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 14), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 14))
+
+ggsave("esa_p3.png", plot = esa_p3, dpi = 350, w = 8, h = 5)
+
+
+
+
+```
+<div align = "justify"> For in-tact soil cores, Nitrogen fixation rates varied between both sampling dates, but not across land management treatments. Summer nitrogen fixation rates were 3.2 times lower than fall nitrogen fixation rates (p = 0.00557). For in-tact soil cores, there was no significantly relationship between nitrogen fixation potential and diazotroph alpha diversity. </div>
+
+
+```{r taxa_barplot, echo = FALSE, fig.height= 8, fig.width= 12}
+genus_sum <- tapply(taxa_sums(bact_mcse), 
+                     tax_table(bact_mcse)[, "Genus"], sum, na.rm=TRUE)
+top10genus <- names(sort(genus_sum, TRUE))[1:10]##
+abundant_genus <- subset_taxa(bact_mcse, Genus %in% top10genus)
+abundant_genus_glom <- tax_glom(abundant_genus, taxrank = "Genus")
+
+abundant_genus_glom <- transform_sample_counts(abundant_genus_glom, function(x) x/sum(x))
+
+abundant_genus_melt <- psmelt(abundant_genus_glom)
+
+
+sum2 <- abundant_genus_melt %>% 
+  group_by(treatment, sample_date, Genus) %>%
+  summarise(means = mean(Abundance))
+
+rare <- sum2 %>%
+  group_by(treatment, sample_date) %>%
+  summarise(means = 1- sum(means)) %>%
+  mutate(Genus = "Other/Unidentified Genus")
+
+#concatenate the datasets
+sum2 = rbind(sum2, rare)
+#order groups
+sum2$Genus <- forcats::fct_relevel(sum2$Genus, "Other/Unidentified Genus", after = Inf)
+
+ 
+sum2 %>%
+  ggplot(aes(x = treatment, y = means, fill = Genus)) +
+  geom_bar(position = "stack", stat = "identity", col = "black") +
+  facet_grid(~sample_date) +
+  theme(legend.position = "right", legend.title = element_blank(), axis.line = element_blank()) +
+  scale_fill_manual(values=met.brewer("Johnson", 11)) +
+  scale_y_continuous(name = NULL, breaks = NULL) +
+  theme(strip.text = element_text(size = 12, face = "italic"), axis.text.x = element_text(size = 10),
+        axis.title = element_blank(),
+        title = element_text(size = 11)) +
+  xlab("MCSE Treatment") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 15)) + 
+  theme(axis.title.y = element_text(size = 15)) + 
+  theme(axis.text.x = element_text(size = 10, color = "black"))  + 
+  theme(axis.text.y = element_text(size = 10, color = "black"))  + 
+  theme(legend.text = element_text(size = 10)) + 
+  theme(legend.position="right", legend.title=element_text(size=10))+
+  theme(legend.position="right")
+```
+<div align = "justify"> When evaluating the top ten most abundant genera across the samples, we identify significant compositional shifts across a) Sampling Date and b) treatment. First, There is a significant enrichment in *Clostridium spp.* in the Summer samples relative to the Fall samples - we particularly see this discrepency in the CF, DF, and SF treatments. There is an enrichment in *Nostoc spp.* in T1, T3, and T4 in the Fall relative to the Summer. There's also an enrichment in *Raoultella spp.* in the CF site and *Beijerinckia spp.* in the SF site in the Fall. *Paenibacillus spp.* dominate the composition of all samples across both sampling date and MCSE treatment. </div> \
+
+
+```{r diff_abundance_MCSE, echo = FALSE, fig.height =8, fig.width = 12}
+bact_mcse <- subset_samples(bact.p, incubation == "in-situ")
+
+## DIFFERENTIAL ABUNDANCE: Summer vs. Fall
+diagdds <- phyloseq_to_deseq2(bact_mcse, ~ sample_date) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("sample_date", "summer","fall"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_mcse)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+sigtab_results_TAX_genra %>%
+ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+  theme_classic() +
+  geom_point(size = 5.75, pch = 21) +
+  geom_hline(yintercept=0, linetype="dashed", color = "red") +
+  geom_text(x=2.3, y=1.5, label="Summer-Enriched", size = 5) +
+  scale_fill_manual(values=met.brewer("Egypt", 12)) +
+  theme(axis.text.x = element_text(angle = -75, hjust = 0, vjust=0.5, size =20), 
+  axis.text.y = element_text(size = 15),
+  axis.title.x = element_text(size = 15),
+  axis.title.y = element_text(size =15),
+  legend.text = element_text(size = 15),
+  legend.title = element_text(size =15)
+    ) 
+summary(sigtab_results)
+
+```
+<div align = "justify"> There are 27 differentially abundant OTUs between Summer and Fall sampling dates. All of these OTUs are enriched in Summer samples, including either *Clostridium* or *Paenibacillus* species. We can evaluated differentially abundant taxa across the land management gradient in both Summer and Fall seasons, independently. </div>
+
+```{r diff_abundance_MCSE_summer, echo = FALSE, fig.height =8, fig.width = 12}
+bact_mcse <- subset_samples(bact.p, incubation == "in-situ")
+bact_mcse <- subset_samples(bact.p, sample_date == "summer")
+
+## DIFFERENTIAL ABUNDANCE: FORESTED SITES VS. MCSE SITES
+sample_data(bact_mcse)$agro <- ifelse(bact_mcse@sam_data$treatment == "SF" |
+                                     bact_mcse@sam_data$treatment == "DF" |
+                                     bact_mcse@sam_data$treatment == "CF" , "Forest", "Agro")
+
+diagdds <- phyloseq_to_deseq2(bact_mcse, ~ agro) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("agro", "Forest","Agro"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_mcse)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+sigtab_results_TAX_genra %>%
+ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+  theme_classic() +
+  geom_point(size = 4.75, pch = 21) +
+  geom_hline(yintercept=0, linetype="dashed", color = "red") +
+  geom_text(x=37.5, y=1.5, label="Forest-Enriched", size = 5) +
+  geom_text(x=37.5, y=-1.5, label="MCSE-Enriched", size = 5) +
+  scale_fill_manual(values=met.brewer("Egypt", 14)) +
+  theme(axis.text.x = element_text(angle = -75, hjust = 0, vjust=0.5, size =14), 
+  axis.text.y = element_text(size = 15),
+  axis.title.x = element_text(size = 15),
+  axis.title.y = element_text(size =15),
+  legend.text = element_text(size = 15),
+  legend.title = element_text(size =15)
+    ) 
+summary(sigtab_results)
+
+## DIFFERENTIAL ABUNDANCE: Perennial vs. Annual Sites - SUMMER 
+bact_mcse <- subset_samples(bact.p, incubation == "in-situ")
+bact_mcse <- subset_samples(bact_mcse, system != "forest")
+bact_mcse <- subset_samples(bact_mcse, sample_date == "summer")
+
+diagdds <- phyloseq_to_deseq2(bact_mcse, ~ system) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("system", "annual","perennial"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_mcse)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+sigtab_results_TAX_genra %>%
+ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+  theme_classic() +
+  geom_point(size = 4.75, pch = 21) +
+  geom_hline(yintercept=0, linetype="dashed", color = "red") +
+  geom_text(x=2.3, y=1.5, label="Annual-Enriched", size = 5) +
+  geom_text(x=2.3, y=-1.5, label="Perennial- Enriched", size = 5) +
+  scale_fill_manual(values=met.brewer("Egypt", 12)) +
+  theme(axis.text.x = element_text(angle = -75, hjust = 0, vjust=0.5, size =20), 
+  axis.text.y = element_text(size = 15),
+  axis.title.x = element_text(size = 15),
+  axis.title.y = element_text(size =15),
+  legend.text = element_text(size = 15),
+  legend.title = element_text(size =15)
+    ) 
+summary(sigtab_results)
+```
+<div align = "justify"> For the Summer samples, DESEQ identified 1390 significant, differentially abundant taxa (p < 0.01). 159 of these taxa were enriched in the forest (CF, DF, SF) sites; 1231 were enriched in the LTER MCSE sites (T1, T3, T4, T5, T7). We see a significant enrichment in *Clostridium* OTUs in the Forest sites. Interestingly, there is a significant enrichment in *Skermanella* OTUs, *Nostoc* OTUs, and *Paenibacillus* OTUs in the MCSE LTER treatments. There were only 12 differentially abundant taxa between annual and perennial agroecosystems. *Clostridium* appear to be enriched in the Annual systems, and *Paenibacillus* appear to be enriched in the perennial systems. </div>
+\
+```{r diff_abundance_MCSE_fall, echo = FALSE, fig.height =8, fig.width = 12}
+bact_mcse <- subset_samples(bact.p, incubation == "in-situ")
+bact_mcse <- subset_samples(bact.p, sample_date == "fall")
+
+## DIFFERENTIAL ABUNDANCE: FORESTED SITES VS. MCSE SITES
+sample_data(bact_mcse)$agro <- ifelse(bact_mcse@sam_data$treatment == "SF" |
+                                     bact_mcse@sam_data$treatment == "DF" |
+                                     bact_mcse@sam_data$treatment == "CF" , "Forest", "Agro")
+
+diagdds <- phyloseq_to_deseq2(bact_mcse, ~ agro) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("agro", "Forest","Agro"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_mcse)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+sigtab_results_TAX_genra %>%
+ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+  theme_classic() +
+  geom_point(size = 4.75, pch = 21) +
+  geom_hline(yintercept=0, linetype="dashed", color = "red") +
+  geom_text(x=4.5, y=-1.5, label="MCSE-Enriched", size = 5) +
+  scale_fill_manual(values=met.brewer("Egypt", 14)) +
+  theme(axis.text.x = element_text(angle = -75, hjust = 0, vjust=0.5, size =14), 
+  axis.text.y = element_text(size = 15),
+  axis.title.x = element_text(size = 15),
+  axis.title.y = element_text(size =15),
+  legend.text = element_text(size = 15),
+  legend.title = element_text(size =15)
+    ) 
+summary(sigtab_results)
+
+## DIFFERENTIAL ABUNDANCE: Perennial vs. Annual Sites - SUMMER 
+bact_mcse <- subset_samples(bact.p, incubation == "in-situ")
+bact_mcse <- subset_samples(bact_mcse, system != "forest")
+bact_mcse <- subset_samples(bact_mcse, sample_date == "fall")
+
+diagdds <- phyloseq_to_deseq2(bact_mcse, ~ system) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("system", "annual","perennial"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_mcse)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+sigtab_results_TAX_genra %>%
+ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+  theme_classic() +
+  geom_point(size = 4.75, pch = 21) +
+  geom_hline(yintercept=0, linetype="dashed", color = "red") +
+  geom_text(x=1.3, y=-1.5, label="Perennial- Enriched", size = 5) +
+  scale_fill_manual(values=met.brewer("Egypt", 12)) +
+  theme(axis.text.x = element_text(angle = -75, hjust = 0, vjust=0.5, size =20), 
+  axis.text.y = element_text(size = 15),
+  axis.title.x = element_text(size = 15),
+  axis.title.y = element_text(size =15),
+  legend.text = element_text(size = 15),
+  legend.title = element_text(size =15)
+    ) 
+summary(sigtab_results)
+```
+</div align = "justify"> In the Fall samples, there were 37 differentially abundant OTUs between the Forested system and the MCSE system. All 37 of these OTUs are enriched in the MCSE treatments. Specifically, there is an enrichment of *Nostoc*, *Paenibacillus*, *Skermanella*, *Nodularia*, and *Calothrix*. There was only one differentially abundant OTU between the perennial and annual agroecosystems. This includes an unknown *Alphaproteobacteria* taxa enriched in the perennial treatment sites. </div>
+
+### Section 3: Evaluating Fumigation-specific Effects on Diazotroph Diversity
+<div align = "justify"> Key taxonomic members of this dataset include members of the *Paenibacillus spp.*, *Bradyrhizobium spp.*, and *Clostridium spp.*. The taxonomic make-up of this dataset varies drastically from the Switchgrass Variety dataset - especially with an enrichment of Painibacillus OTUs. This may be reflective of a) the bulk soil microbiome compartment and b) the different aboveground cropping systems. </div>
+
+```{r silent_ordination, include=FALSE}
+set.seed(37920)
+bact.rfy.rel <- transform_sample_counts(bact.rfy, function(x) x / sum(x) )
+bact.rfy.rel <- subset_samples(bact.rfy.rel, incubation != 'in-situ')
+bray.NMDS <- ordinate(bact.rfy.rel, method = "NMDS", distance = "bray")
+
+
+
+```
+<div align = "justify"> In this section, I will evaluate samples from the fumigation experiment. This includes all soils that have been fumigated for 0, 24, 48, and 72 hours, respectively. I will evaluate broad trends in both alpha- and beta- diversity across the land management gradient, fumigation treatment, and the soil biogeochemical data. </div>
+```{r full_analysis_1, echo = FALSE, fig.height =8, fig.width = 14}
+# ALPHA DIVERSITY - By Treatment and Fumigation
+# Calculate Shannon Diversity
+bact.fum <- subset_samples(bact.rfy, incubation != 'in-situ')
+
+otu_table <- t(as(bact.fum@otu_table, "matrix"))
+otu_table <- as.data.frame(otu_table)
+
+shan <- hill_taxa(otu_table, q = 1)
+shan <- merge(bact.rfy@sam_data, shan, by = 0)
+colnames(shan)[colnames(shan) == "y"] ="shan"
+
+shan %>%
+  ggplot(aes(x=treatment, y = shan, fill = treatment)) +
+  geom_boxplot() +
+  scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  ylab("Shannon Diversity") +
+  xlab("") +
+  facet_grid(~incubation) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 10), 
+  axis.title.y = element_text(size = 10), 
+  axis.text.x = element_blank(), 
+  axis.text.y = element_text(size = 10, color = "black"), 
+  legend.text = element_text(size = 10), 
+  legend.title = element_text(size = 10))
+
+mod <- lm(shan ~ treatment + incubation, data =shan)
+summary(mod)
+
+```
+<div align = "justify"> Both MCSE treatment and fumigation treatment significantly impact alpha diversity. First, shannon diversity varies significantly across all MCSE treatments. Specifically, the forested treatment sites (CF, DF, SF) have significantly lower alpha diversity relative to the cropping agroecosystems. The highest mean diversity was in the T4 site at 334.47 (95% CI: 293.23 - 375.71; p < 0.05); which was 2.8 times, 2.2 times, and and 2.3 times higher than the coniferous forest (CF), deciduous forest (DF), and successional forest (SF) shannon diversity values, respectively. Further, fumigation treatment also significantly influenced alpha diversity. Samples that were fumigated for 24 and 72 hours had decreased estimates for shannon diversity by 64.07 (95% CI: 17.43 - 110.71) units and 69.18 (95% CI: 22.55 - 115.81) units, respectively. Interestingly, there was no seasonal variation in diazotroph alpha diversity. </div>
+
+```{r full_analysis_2, echo = FALSE, fig.height =8, fig.width = 14}
+
+### ALPHA DIVERSITY AND N-FIXATION
+# Remove all samples that lack N-fixation data
+bact.nfix <- subset_samples(bact.rfy, n.fix != 'NA' & incubation != 'in-situ')
+
+# Calculate Shannon Diversity
+otu_table <- t(as(bact.nfix@otu_table, "matrix"))
+otu_table <- as.data.frame(otu_table)
+
+shan <- hill_taxa(otu_table, q = 1)
+shan <- merge(bact.nfix@sam_data, shan, by = 0)
+colnames(shan)[colnames(shan) == "y"] ="shan"
+# Create a linear model
+mod <- lm(n.fix ~ shan, data = shan)
+
+
+shan.pred  <-   data.frame(n.fix= seq(min(shan$n.fix), max(shan$n.fix), length.out =77), 
+                           shan = seq(min(shan$shan), max(shan$shan), length.out =77))
+
+mod.pred <- predict(mod, newdata = shan.pred, allow.new.levels=TRUE, se = TRUE)
+mod.pred <- as.data.frame(mod.pred)
+
+mod.pred$upperCI <- (mod.pred$fit + 1.96*(mod.pred$se.fit))
+mod.pred$lowerCI <- (mod.pred$fit - 1.96*(mod.pred$se.fit))
+
+shan$treatment <- factor(shan$treatment, levels = c("T1", "T3", "T4", "T5", "T7", "SF", "DF", "CF"))
+# Plot the data with linear model predictions
+shan %>%
+  ggplot(aes(x=shan, y = n.fix)) +
+  geom_point(aes(fill = treatment, shape = incubation), size = 4.5) +  
+  scale_fill_manual(values=c('#EEAC4E','#D7785D','#9C7C50', '#577753','#1A4C76', '#86A592','#577B96','#B0381D'), name = "MCSE Treatment",
+                     labels = c(
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat", "T4: Bio-Based Corn/Soy/Wheat", "T5: Perennial Poplar", "T7: Early Successional Grassland", "SF: Successional Forest", "DF: Deciduous Forest", "CF: Coniferous Forest" )) +
+    scale_shape_manual(values =c(21, 22, 23, 24), name = "Fumigation Time (Hr)", 
+                     labels = c("0 Hours", "24 Hours", "72 Hours", "Reference")) +
+  geom_line(aes(x = shan.pred$shan, y = mod.pred$upperCI),linetype = "dashed",  col = 'black', linewidth=1) +
+  geom_line(aes(x = shan.pred$shan, y = mod.pred$lowerCI),linetype = "dashed", col = 'black', linewidth=1) +
+  geom_line(aes(x = shan.pred$shan, y = mod.pred$fit), col = 'black', linewidth = 1.25) +
+  xlab("Shannon Diversity") + 
+  ylab("Nitrogen Fixation Potential (\u00b5g/g)") +
+  guides(fill = guide_legend(override.aes = list(shape=c(21, 22, 23,24)))) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 12), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 12), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+esa_p7 <- shan %>%
+  ggplot(aes(x=shan, y = n.fix)) +
+  geom_point(aes(fill = treatment, shape = incubation), size = 4.5) +  
+  scale_fill_manual(values=c('#EEAC4E','#D7785D','#9C7C50', '#577753','#1A4C76', '#86A592','#577B96','#B0381D'), name = "MCSE Treatment",
+                     labels = c(
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat", "T4: Bio-Based Corn/Soy/Wheat", "T5: Perennial Poplar", "T7: Early Successional Grassland", "SF: Successional Forest", "DF: Deciduous Forest", "CF: Coniferous Forest" )) +
+    scale_shape_manual(values =c(21, 22, 23, 24), name = "Fumigation Time (Hr)", 
+                     labels = c("0 Hours", "24 Hours", "72 Hours", "Reference")) +
+  geom_line(aes(x = shan.pred$shan, y = mod.pred$upperCI),linetype = "dashed",  col = 'black', linewidth=1) +
+  geom_line(aes(x = shan.pred$shan, y = mod.pred$lowerCI),linetype = "dashed", col = 'black', linewidth=1) +
+  geom_line(aes(x = shan.pred$shan, y = mod.pred$fit), col = 'black', linewidth = 1.25) +
+  xlab("Shannon Diversity") + 
+  ylab("Nitrogen Fixation Potential (\u00b5g/g)") +
+  guides(fill = guide_legend(override.aes = list(shape=c(21, 22, 23,24)))) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 12), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 12), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+ggsave("esa_p7.png", plot = esa_p7, dpi = 350, w =8, h =5)
+
+summary(mod)
+shan$incubation <- as.factor(shan$incubation)
+
+esa_p6 <- shan %>%
+  ggplot(aes(x=shan, y = n.fix, col = treatment)) +
+  geom_point(aes(shape = incubation), size = 4.5) +  
+  facet_grid(~system, scales = 'free') +
+  geom_smooth(method = 'lm') +
+  scale_color_manual(values=c('#EEAC4E','#D7785D','#9C7C50', '#577753',
+                             '#1A4C76', '#86A592', '#B0381D','#577B96'), name = "MCSE Treatment",
+                     labels = c(
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Perennial Poplar", "T7: Early Successional Grassland",
+                                "SF: Successional Forest", "CF: Coniferous Forest", "DF: Deciduous Forest")) +
+  xlab("Shannon Diversity") + 
+  ylab("Nitrogen Fixation Potential (\u00b5g/g)") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 12), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 12), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+ggsave("esa_p6.png", plot = esa_p6, dpi = 350, w =12, h =4.5)
+
+
+## Partial correlation test
+library(ppcor)
+shan_pcor <- shan %>% 
+  filter(don != 'NA')
+
+pcor.test(shan_pcor$shan, shan_pcor$n.fix, shan_pcor$don)
+
+
+
+
+
+```
+<div align = "justify"> When evaluating all samples with N-fixation data, we identify a significant positive association with shannon diversity and N-fixation potential. A one unit change in nitrogen fixation potential results in a 9.85 increase in shannon diversity (95% CI: 3.87 - 15.82; p = 0.00148). Thus, we have identified a significant relationship with diazotroph biodiversity and ecosystem functioning. </div>
+
+```{r full_analysis_3, echo = FALSE, fig.height =8, fig.width = 14}
+### BETA DIVERSITY WITH FULL ENVFIT MODEL
+# Data with No nas
+# Set up env
+bact.total <- subset_samples(bact.rfy, incubation != 'in-situ')
+env <- as.data.frame(sample_data(bact.total))
+
+set.seed(37920)
+ord.fit.sig <- envfit(bray.NMDS ~ env$treatment + env$incubation + 
+                      env$sample_date + env$n.fix + env$mbc + env$doc + env$don, 
+                      perm = 9999, na.rm = TRUE)
+
+data.scores <- as.data.frame(scores(bray.NMDS)$sites)
+data.scores$treatment <- env$treatment
+data.scores$incubation <- env$incubation
+data.scores$sample_date <- env$sample_date
+data.scores$n.fix <- env$n.fix
+data.scores$mbc <- env$mbc
+#data.scores$mbn <- env$mbn (Not significant)
+data.scores$doc <- env$doc
+data.scores$don <- env$don
+
+
+
+en_coord_cont <- as.data.frame(scores(ord.fit.sig, "vectors")) * ordiArrowMul(ord.fit.sig)
+en_coord_cont$name <- c("N-Fixation", "MBC", "DOC", "DON")
+
+data.scores$treatment <- factor(data.scores$treatment, levels = c("T1", "T3", "T4", "T5", "T7", "SF", "CF", "DF"))
+data.scores %>%
+  ggplot(aes(x=NMDS1,y=NMDS2)) +
+  geom_point(aes(fill = treatment, shape = incubation), size = 5.5) +
+  scale_fill_manual(values=c('#EEAC4E', '#D7785D','#9C7C50', '#577753','#1A4C76', 
+                             '#86A592', '#B0381D','#577B96'), name = "MCSE Treatment",
+                     labels = c("T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Perennial Poplar", "T7: Early Successional Grassland",  
+                                "SF: Successional Forest", "CF: Coniferous Forest", "DF: Deciduous Forest")) +
+  scale_shape_manual(values =c(21, 22, 23, 24), name = "Fumigation Time (Hr)", 
+                     labels = c("0 Hours", "24 Hours", "72 Hours", "Reference")) +
+  geom_segment(aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2), 
+       data = en_coord_cont, size =1.25, alpha = 0.7, colour = "black") +
+  geom_label(data = en_coord_cont, aes(x = NMDS1, y = NMDS2), colour = "black", 
+       fontface = "bold", size = 5.5, label = en_coord_cont$name, fill = "white") + 
+  guides(fill = guide_legend(override.aes = list(shape=c(21, 22, 23,24)))) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 15)) + 
+  theme(axis.title.y = element_text(size = 15)) + 
+  theme(axis.text.x = element_text(size = 12, color = "black"))  + 
+  theme(axis.text.y = element_text(size = 12, color = "black"))  + 
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=2))+
+  theme(legend.text = element_text(size = 12)) + 
+  theme(legend.position="right", legend.title=element_text(size=14))+
+  theme(legend.position="right")
+print(ord.fit.sig)
+```
+\
+
+<div align = "justify"> Because of a lot of mixing biogeochemical data, the full, environmental model is likely overrepresented. Ultimately, treatment, fumigation, nitrogen fixation potential, microbial biomass carbon, dissolvable organic carbon, and dissolvable organic nitrogen significantly impact the diazotroph community composition. In the NMDS plot above, there is significantly clustering associated with both MCSE treatment and fumigation time. Compositionally, the T1 and T3 sites are most similar to eachother. The forest sites (CF, DF, and SF) are compositionally distinct from the MCSE sites and cluster out to the left of the NMDS plot. In addition, the 24-hour and 72-hour fumigation samples cluster below the NMDS2 axis. This indicates that fumigation and MCSE treatment functionally impacted the beta diversity of the diazotroph samples. Now, we will evaluate interactive effects of both aboveground land management and fumigation on diazotroph alpha diversity. </div> 
+```{r fumigation_interaction, echo = FALSE, fig.height =8, fig.width = 12}
+bact_fum <- subset_samples(bact.rfy, incubation != "in-situ" & sample_date == "summer")
+
+
+# Calculate Shannon Diversity
+otu_table <- t(as(bact_fum@otu_table, "matrix"))
+otu_table <- as.data.frame(otu_table)
+
+shan <- hill_taxa(otu_table, q = 1)
+shan <- merge(bact_fum@sam_data, shan, by = 0)
+
+
+colnames(shan)[colnames(shan) == "y"] ="shan"
+shan$incubation <- as.numeric(shan$incubation)
+# Create a linear model
+mod <- lm(shan ~ incubation + treatment, data = shan)
+mod.aov <- aov(shan ~ incubation +treatment, data = shan)
+
+# look at system effects
+mod.aov.1 <- aov(shan ~ incubation * system, data = shan)
+mod.1 <- lm(shan ~ incubation * system, data = shan)
+
+
+
+# Create newdata
+shan.pred.T1  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "T1")
+shan.pred.T3  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "T3")
+shan.pred.T4  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "T4")
+shan.pred.T5  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "T5")
+shan.pred.T7  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "T7")
+shan.pred.CF  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "CF")
+shan.pred.DF  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "DF")
+shan.pred.SF  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                              incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87),
+                              treatment = "SF")
+
+
+
+
+# Then use predict() to get predictions and SE of predictions for each MCSE treatment
+mod.pred.T1 <- predict(mod, newdata = shan.pred.T1, allow.new.levels=TRUE, se = TRUE)
+mod.pred.T1 <- as.data.frame(mod.pred.T1)
+mod.pred.T1$upperCI <- (mod.pred.T1$fit + 1.96*(mod.pred.T1$se.fit))
+mod.pred.T1$lowerCI <- (mod.pred.T1$fit - 1.96*(mod.pred.T1$se.fit))
+
+mod.pred.T3 <- predict(mod, newdata = shan.pred.T3, allow.new.levels=TRUE, se = TRUE)
+mod.pred.T3 <- as.data.frame(mod.pred.T3)
+mod.pred.T3$upperCI <- (mod.pred.T3$fit + 1.96*(mod.pred.T3$se.fit))
+mod.pred.T3$lowerCI <- (mod.pred.T3$fit - 1.96*(mod.pred.T3$se.fit))
+
+mod.pred.T4 <- predict(mod, newdata = shan.pred.T4, allow.new.levels=TRUE, se = TRUE)
+mod.pred.T4 <- as.data.frame(mod.pred.T4)
+mod.pred.T4$upperCI <- (mod.pred.T4$fit + 1.96*(mod.pred.T4$se.fit))
+mod.pred.T4$lowerCI <- (mod.pred.T4$fit - 1.96*(mod.pred.T4$se.fit))
+
+mod.pred.T5 <- predict(mod, newdata = shan.pred.T5, allow.new.levels=TRUE, se = TRUE)
+mod.pred.T5 <- as.data.frame(mod.pred.T5)
+mod.pred.T5$upperCI <- (mod.pred.T5$fit + 1.96*(mod.pred.T5$se.fit))
+mod.pred.T5$lowerCI <- (mod.pred.T5$fit - 1.96*(mod.pred.T5$se.fit))
+
+mod.pred.T7 <- predict(mod, newdata = shan.pred.T7, allow.new.levels=TRUE, se = TRUE)
+mod.pred.T7 <- as.data.frame(mod.pred.T7)
+mod.pred.T7$upperCI <- (mod.pred.T7$fit + 1.96*(mod.pred.T7$se.fit))
+mod.pred.T7$lowerCI <- (mod.pred.T7$fit - 1.96*(mod.pred.T7$se.fit))
+
+mod.pred.CF <- predict(mod, newdata = shan.pred.CF, allow.new.levels=TRUE, se = TRUE)
+mod.pred.CF <- as.data.frame(mod.pred.CF)
+mod.pred.CF$upperCI <- (mod.pred.CF$fit + 1.96*(mod.pred.CF$se.fit))
+mod.pred.CF$lowerCI <- (mod.pred.CF$fit - 1.96*(mod.pred.CF$se.fit))
+
+mod.pred.DF <- predict(mod, newdata = shan.pred.DF, allow.new.levels=TRUE, se = TRUE)
+mod.pred.DF <- as.data.frame(mod.pred.DF)
+mod.pred.DF$upperCI <- (mod.pred.DF$fit + 1.96*(mod.pred.DF$se.fit))
+mod.pred.DF$lowerCI <- (mod.pred.DF$fit - 1.96*(mod.pred.DF$se.fit))
+
+mod.pred.SF <- predict(mod, newdata = shan.pred.SF, allow.new.levels=TRUE, se = TRUE)
+mod.pred.SF <- as.data.frame(mod.pred.SF)
+mod.pred.SF$upperCI <- (mod.pred.SF$fit + 1.96*(mod.pred.SF$se.fit))
+mod.pred.SF$lowerCI <- (mod.pred.SF$fit - 1.96*(mod.pred.SF$se.fit))
+
+
+
+# Plot the data with linear model predictions
+shan %>%
+  ggplot(aes(x=incubation, y = shan, color = treatment)) +
+  geom_point(size = 5.5) +
+  scale_color_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  geom_line(aes(x = shan.pred.T1$incubation, y = mod.pred.T1$fit, col = shan.pred.T1$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.T1$incubation, y = mod.pred.T1$upperCI, col = shan.pred.T1$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.T1$incubation, y = mod.pred.T1$lowerCI, col = shan.pred.T1$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.T3$incubation, y = mod.pred.T3$fit, col = shan.pred.T3$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.T3$incubation, y = mod.pred.T3$upperCI, col = shan.pred.T3$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.T3$incubation, y = mod.pred.T3$lowerCI, col = shan.pred.T3$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.T4$incubation, y = mod.pred.T4$fit, col = shan.pred.T4$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.T4$incubation, y = mod.pred.T4$upperCI, col = shan.pred.T4$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.T4$incubation, y = mod.pred.T4$lowerCI, col = shan.pred.T4$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.T5$incubation, y = mod.pred.T5$fit, col = shan.pred.T5$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.T5$incubation, y = mod.pred.T5$upperCI, col = shan.pred.T5$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.T5$incubation, y = mod.pred.T5$lowerCI, col = shan.pred.T5$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.T7$incubation, y = mod.pred.T7$fit, col = shan.pred.T7$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.T7$incubation, y = mod.pred.T7$upperCI, col = shan.pred.T7$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.T7$incubation, y = mod.pred.T7$lowerCI, col = shan.pred.T7$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.CF$incubation, y = mod.pred.CF$fit, col = shan.pred.CF$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.CF$incubation, y = mod.pred.CF$upperCI, col = shan.pred.CF$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.CF$incubation, y = mod.pred.CF$lowerCI, col = shan.pred.CF$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.DF$incubation, y = mod.pred.DF$fit, col = shan.pred.DF$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.DF$incubation, y = mod.pred.DF$upperCI, col = shan.pred.DF$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.DF$incubation, y = mod.pred.DF$lowerCI, col = shan.pred.DF$treatment), 
+            linetype = "dashed", linewidth = 2) +
+    geom_line(aes(x = shan.pred.SF$incubation, y = mod.pred.SF$fit, col = shan.pred.SF$treatment), linewidth = 2) +
+  geom_line(aes(x = shan.pred.SF$incubation, y = mod.pred.SF$upperCI, col = shan.pred.SF$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  geom_line(aes(x = shan.pred.SF$incubation, y = mod.pred.SF$lowerCI, col = shan.pred.SF$treatment), 
+            linetype = "dashed", linewidth = 2) +
+  ylab("Shannon Diversity") + 
+  xlab("Fumigation Time (Hr)") +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 12), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 12), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+shan %>%
+  ggplot(aes(x=incubation, y = shan, color = treatment)) +
+  geom_point(size = 5.5) +
+  facet_grid(~system) +
+  stat_smooth(method = 'lm') +
+  scale_color_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  ylab("Shannon Diversity") + 
+  xlab("Fumigation Time (Hr)") +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 12), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 12), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+shan <- shan %>%
+  filter(n.fix != 'NA')
+
+
+shan %>%
+  ggplot(aes(x=incubation, y = n.fix, color = treatment)) +
+  geom_point(size = 5.5) +
+  facet_grid(~system) +
+  scale_color_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  ylab("Nitrogen Fixation Potential") + 
+  xlab("Fumigation Time (Hr)") +
+  stat_smooth(method = 'lm') +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 12), 
+  axis.title.y = element_text(size = 12), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 12), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+summary(mod)
+summary(mod.aov)
+summary(mod.1)
+summary(mod.aov.1)
+
+# Create a linear model
+mod <- lm(shan ~ incubation, data = shan)
+
+
+shan.pred  <-   data.frame(shan= seq(min(shan$shan), max(shan$shan), length.out =87), 
+                           incubation = seq(min(shan$incubation), max(shan$incubation), length.out =87))
+
+mod.pred <- predict(mod, newdata = shan.pred, allow.new.levels=TRUE, se = TRUE)
+mod.pred <- as.data.frame(mod.pred)
+
+mod.pred$upperCI <- (mod.pred$fit + 1.96*(mod.pred$se.fit))
+mod.pred$lowerCI <- (mod.pred$fit - 1.96*(mod.pred$se.fit))
+
+shan$system <- factor(shan$system, levels = c("annual", "perennial", "forest"))
+
+esa_p4 <- shan %>%
+  ggplot(aes(x=incubation, y = shan, color = system)) +
+  geom_point(size = 5.5) +
+  scale_color_manual(values=met.brewer("Kandinsky", 3), name = "System") +
+  geom_line(aes(x = shan.pred$incubation, y = mod.pred$upperCI),linetype = "dashed",  col = 'black', linewidth=1) +
+  geom_line(aes(x = shan.pred$incubation, y = mod.pred$lowerCI),linetype = "dashed", col = 'black', linewidth=1) +
+  geom_line(aes(x = shan.pred$incubation, y = mod.pred$fit), col = 'black', linewidth = 1.25) +
+  ylab("Shannon Diversity") + 
+  xlab("Fumigation Time (Hr)") +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 14), 
+  axis.title.y = element_text(size = 14), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 14), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+ggsave("esa_p4.png", plot = esa_p4, dpi = 350, w = 7, h =4.5)
+
+# Create a linear model
+mod <- lm(n.fix ~ incubation, data = shan)
+
+shan <- shan %>%
+  subset(n.fix !='NA')
+
+shan.pred  <-   data.frame(n.fix= seq(min(shan$n.fix), max(shan$n.fix), length.out =77), 
+                           incubation = seq(min(shan$incubation), max(shan$incubation), length.out =77))
+
+mod.pred <- predict(mod, newdata = shan.pred, allow.new.levels=TRUE, se = TRUE)
+mod.pred <- as.data.frame(mod.pred)
+
+mod.pred$upperCI <- (mod.pred$fit + 1.96*(mod.pred$se.fit))
+mod.pred$lowerCI <- (mod.pred$fit - 1.96*(mod.pred$se.fit))
+
+shan$system <- factor(shan$system, levels = c("annual", "perennial", "forest"))
+shan$treatment <- factor(shan$treatment, levels = c("T1", "T3", "T4", "T5", "T7", "SF", "DF", "CF"))
+
+esa_p5 <- shan %>%
+  ggplot(aes(x=incubation, y = n.fix, color = treatment)) +
+  geom_point(size = 5.5) +
+  facet_grid(~system) +
+  geom_smooth(method = 'lm') +
+  scale_color_manual(values=c('#EEAC4E','#D7785D','#9C7C50', '#577753',
+                             '#1A4C76','#86A592','#577B96','#B0381D'), name = "MCSE Treatment",
+                     labels = c("T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional",
+                                "SF: Successional Forest", "DF: Deciduous Forest", "CF: Coniferous Forest")) +
+  ylab("Nitrogen Fixation Potential (\u00b5g/g soil)") +
+  xlab("Fumigation Time (Hr)") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 14), 
+  axis.title.y = element_text(size = 14), 
+  axis.text.x = element_text(size = 12, color = "black"), 
+  axis.text.y = element_text(size = 12, color = "black"), 
+  panel.border = element_rect(colour = "black", fill=NA, size=2),
+  legend.text = element_text(size = 12), 
+  legend.title = element_text(size = 14), 
+  plot.margin=unit(c(.5,1,.5,.5),"cm"))
+
+ggsave("esa_p5.png", plot = esa_p5, dpi = 350, w = 12, h =5.5)
+
+# Delta Diversity: 0 vs. 24
+# Delta Diversity 
+shan_0 <- shan %>%
+  filter(incubation == "0")
+
+shan_24 <- shan %>%
+  filter(incubation == "24")
+
+shan_24$delta <- shan_24$shan - shan_0$shan
+shan_24$deltan <- shan_24$n.fix - shan_0$n.fix
+
+shan_24 <- shan_24 %>%
+  filter(deltan != 'NA')
+
+shan_24 <- shan_24 %>%
+  filter(treatment == "SF")
+
+
+shan_24 %>%
+  ggplot(aes(x=n.fix, y = delta)) +
+  geom_point() +
+  stat_smooth(method = 'lm')
+
+```
+<div align = "justify"> It appears that fumigation time and MCSE treatment additively effect Shannon diversity. Interestingly, fumigation negatively impacts alpha diversity across all MCSE treatments, but the overall effect is fairly small. Indeed, a one-unit increase in fumigation time decreases shannon diversity by -1.0092 (95% CI: 0.5 - 1.5; p = 0.000108). This indicates that the loss in diazotroph biodiversity by 24 hour and 72 hour fumigation time is actively being reflected in the DNA sequencing data. Ultimately, there must be microbial turnover in necromass DNA, resulting in a reduction in total biodiversity from the sequencing results. More interesting, some of the MCSE treatments are more responsive to fumigation treatments than others. Specifically, the annual cropping systems T1, T3, and T4 have larger slopes with fumigation time compared to the perennial (T5/T7) and forest (CF/DF/SF) agroecosystems. Further, T1, T3, and T4 agroecosystems had higher baseline diazotroph diversity prior to fumigation. This indicates that there is a portion of the diazotroph community that is more resistant to fumigation - it is possible that this resilient portion of the community is less transient and more persistent across all agroecosystems, including the perennial and forested treatments. </div>
+
+
+
+
+```{r silent_ordination_3, include = FALSE}
+set.seed(37920)
+bact.fum.rel <- transform_sample_counts(bact_fum, function(x) x / sum(x) )
+bray.NMDS.fum <- ordinate(bact.fum.rel, method = "NMDS", distance = "bray")
+
+
+```
+
+```{r beta_diversity_fum, echo = FALSE, fig.height= 8, fig.width= 12}
+# extract out x and y dimensions from ordination 
+bray.points <- as.data.frame(bray.NMDS.fum$points)
+bray.points <- rownames_to_column(bray.points, "sample")
+
+sam_data <- as(sample_data(bact.fum.rel), "data.frame")
+sam_data <- rownames_to_column(sam_data, "sample")
+
+bray.points.m <- merge(bray.points, sam_data, by = "sample")
+
+# PLOT ordination
+bray.points.m %>%
+  ggplot(aes(x=MDS1,y=MDS2)) +
+  geom_point(aes(fill = treatment, shape = incubation), size = 4.75) +
+  scale_fill_manual(values=c('#B0381D','#577B96','#86A592','#EEAC4E',
+                             '#D7785D','#9C7C50', '#577753','#1A4C76'), name = "MCSE Treatment",
+                     labels = c("CF: Coniferous Forest", "DF: Deciduous Forest", "SF: Successional Forest", 
+                                "T1: Conventional Corn/Soy/Wheat", "T3: Reduced Input Corn/Soy/Wheat",
+                                "T4: Bio-Based Corn/Soy/Wheat", "T5: Poplar", "T7: Early Successional")) +
+  scale_shape_manual(values =c(21, 22, 23), name = "Fumigation Time (Hr)", labels = c("0 Hour", "24 Hour", "72 Hour")) +
+  guides(fill = guide_legend(override.aes = list(shape=c(21, 22)))) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 15)) + 
+  theme(axis.title.y = element_text(size = 15)) + 
+  theme(axis.text.x = element_text(size = 10, color = "black"))  + 
+  theme(axis.text.y = element_text(size = 10, color = "black"))  + 
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=2))+
+  theme(legend.text = element_text(size = 10)) + 
+  theme(legend.position="right", legend.title=element_text(size=10))+
+  theme(legend.position="right")
+
+# permANOVA
+set.seed(37920)
+bray.NMDS.fum <- phyloseq::distance(bact_fum,"bray")
+set.seed(37920)
+permanova <- adonis(bray.NMDS.fum~sample_data(bact.fum.rel)$treatment + 
+                    sample_data(bact.fum.rel)$incubation, permutations = 9999, method = "bray")
+permanova["aov.tab"]
+```
+<div align = "justify"> Both MCSE treatment and fumigation time impact diazotroph community composition. MCSE treatment explaines 22.4% of variability across all fumigation samples (R2 = 0.224; p < 0.01), and fumigation time explaines 11.75% of variability across all fumigation samples (R2 = 0.117; p < 0.01). We see clustering by treatment and fumigation time in the NMDS ordination of Bray-curtis dissimilarity above. Interestingly, the annual cropping systems are always compositionally similar to one another, but the 24-hour and 72-hour samples cluster to the left of the X-axis and are significantly distinct from the 0 hour fumigation samples. We observe a similar trend with the perennial T5/T7 agroecosystems. The clustering by fumigation is less deterministic for the forested treatments (CF; DF; SF). Although the 0 -hour forested samples appear to cluster below the Y-axis, there is still a significant amount of variability in community composition. Ultimately, fumigation appears to shift diazotroph composition; some of the MCSE treatments are more responsive to this fumigation than others - particularly the annual agroceosystems. </div>
+
+```{r taxa_barplot_fum, echo = FALSE, fig.height= 8, fig.width= 12}
+genus_sum <- tapply(taxa_sums(bact_fum), 
+                     tax_table(bact_fum)[, "Genus"], sum, na.rm=TRUE)
+top10genus <- names(sort(genus_sum, TRUE))[1:10]##
+abundant_genus <- subset_taxa(bact_fum, Genus %in% top10genus)
+abundant_genus_glom <- tax_glom(abundant_genus, taxrank = "Genus")
+
+abundant_genus_glom <- transform_sample_counts(abundant_genus_glom, function(x) x/sum(x))
+
+abundant_genus_melt <- psmelt(abundant_genus_glom)
+
+
+sum2 <- abundant_genus_melt %>% 
+  group_by(treatment, incubation, Genus) %>%
+  summarise(means = mean(Abundance))
+
+rare <- sum2 %>%
+  group_by(treatment, incubation) %>%
+  summarise(means = 1- sum(means)) %>%
+  mutate(Genus = "Other/Unidentified Genus")
+
+#concatenate the datasets
+sum2 = rbind(sum2, rare)
+#order groups
+sum2$Genus <- forcats::fct_relevel(sum2$Genus, "Other/Unidentified Genus", after = Inf)
+
+ 
+sum2 %>%
+  ggplot(aes(x = treatment, y = means, fill = Genus)) +
+  geom_bar(position = "stack", stat = "identity", col = "black") +
+  facet_grid(~incubation) +
+  theme(legend.position = "right", legend.title = element_blank(), axis.line = element_blank()) +
+  scale_fill_manual(values=met.brewer("Johnson", 11)) +
+  scale_y_continuous(name = NULL, breaks = NULL) +
+  theme(strip.text = element_text(size = 12, face = "italic"), axis.text.x = element_text(size = 10),
+        axis.title = element_blank(),
+        title = element_text(size = 11)) +
+  xlab("MCSE Treatment") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 15)) + 
+  theme(axis.title.y = element_text(size = 15)) + 
+  theme(axis.text.x = element_text(size = 10, color = "black"))  + 
+  theme(axis.text.y = element_text(size = 10, color = "black"))  + 
+  theme(legend.text = element_text(size = 10)) + 
+  theme(legend.position="right", legend.title=element_text(size=10))+
+  theme(legend.position="right")
+```
+<div align = "justify"> For dominant taxonomic genera, the main differences across fumigation treatment are noticeable between the 0 hour fumigation time and the 24 hour fumigation time. There is a clear reduction in *Nostoc spp.* beyond the 0 hour fumigation time, indicating that this group of taxa are lost to the chloroform fumigation. There is also a noticeable reduction in *Arcobacter spp*. There are no significant compositional differences in dominant genera between the 24 hour and 72 hour fumigation times. This further indicates that most of the biodiversity reduction occured during the first 24 hours of chloroform fumigation. </div>
+
+```{r diff_abundance_fum, echo = FALSE, fig.height =14, fig.width = 12}
+bact_fum_ext <- subset_samples(bact.p, incubation == "0" | incubation == "24")
+
+## DIFFERENTIAL ABUNDANCE: 0 Hr. vs 24Hr 
+diagdds <- phyloseq_to_deseq2(bact_fum_ext, ~ incubation) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("incubation", "0","24"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+sigtab_results_0_vs_24 <- results[which(results$padj < 0.01), ]
+
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_fum_ext)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+p1 <- sigtab_results_TAX_genra %>%
+        ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+          theme_classic() +
+          geom_point(size = 3.75, pch = 21) +
+          geom_hline(yintercept=0, linetype="dashed", color = "red") +
+          geom_text(x=24.5, y=1.5, label="0 Hr. Enriched", size = 5) +
+          geom_text(x=24.5, y=-1.5, label="24 Hr. Enriched", size = 5) +
+          scale_fill_manual(values=met.brewer("Egypt", 13)) +
+          theme(axis.text.x = element_text(angle = -75, hjust = 0, 
+                                           vjust=0.5, size =20), 
+          axis.text.y = element_text(size = 15),
+          axis.title.x = element_text(size = 15),
+          axis.title.y = element_text(size =15),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size =15)) 
+
+## DIFFERENTIAL ABUNDANCE: 0 Hr. vs 72Hr
+bact_fum_ext <- subset_samples(bact.p, incubation == "0" | incubation == "72")
+diagdds <- phyloseq_to_deseq2(bact_fum_ext, ~ incubation) 
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="parametric")
+
+
+results <- results(diagdds, alpha = 0.01, contrast = c("incubation", "0","72"))
+
+sigtab_results <- results[which(results$padj < 0.01), ]
+sigtab_results_0_vs_72 <- results[which(results$padj < 0.01), ]
+
+sigtab_results_TAX <- cbind(as(sigtab_results, "data.frame"), as(tax_table(bact_fum_ext)[row.names(sigtab_results), ], "matrix"))
+
+sigtab_results_TAX_genra <- subset(sigtab_results_TAX, !is.na(Genus))
+
+
+# Order Genus 
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Class, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Class <- factor(as.character(sigtab_results_TAX_genra$Class), levels=names(x))
+# Genus order
+x <- tapply(sigtab_results_TAX_genra$log2FoldChange, sigtab_results_TAX_genra$Genus, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab_results_TAX_genra$Genus <- factor(as.character(sigtab_results_TAX_genra$Genus), levels=names(x))
+
+
+p2 <- sigtab_results_TAX_genra %>%
+      ggplot(aes(x=Genus, y=log2FoldChange, fill=Class)) + 
+        theme_classic() +
+        geom_point(size = 5.75, pch = 21) +
+        geom_hline(yintercept=0, linetype="dashed", color = "red") +
+        geom_text(x=16.5, y=1.5, label="0 Hr. Enriched", size = 5) +
+        geom_text(x=16.5, y=-1.5, label="72 Hr. Enriched", size = 5) +
+        scale_fill_manual(values=met.brewer("Egypt", 12)) +
+        theme(axis.text.x = element_text(angle = -75, hjust = 0, 
+                                         vjust=0.5, size =20), 
+        axis.text.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size =15),
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size =15)
+          ) 
+
+ggsave("deseq.png", plot = p2, dpi = 350, w = 10.5, h = 5.5)
+
+plots <- align_plots(p1, p2, align = 'v', axis = 'l')
+
+top_row <- plot_grid(
+  plots[[1]],
+  labels = c("A"),
+  rel_widths = c(1),
+  nrow = 1
+)
+
+bottom_row <- plot_grid(
+  plots[[2]],
+  labels = c("B"),
+  rel_widths = c(1),
+  nrow = 1
+)
+
+plot_grid(top_row, bottom_row, ncol = 1)
+summary(sigtab_results_0_vs_24)
+summary(sigtab_results_0_vs_72)
+```
+<div align = "justify"> There were 451 differentially abundant OTUs between the 0 hour and 24 hour fumigation treatment.There were 75 taxa enriched in 0 hours, and 376 taxa enriched at 24 hours. We see an enrichment of taxa such as *Nostoc spp.*, *Skermanella spp.*, *Bradyrhizobium spp*, *Calothrix spp*, and *Klebsiella spp.* at 0 hours, indicating that these taxa were lost due to fumigation. Taxa that were resilient to fumigation at 24 hours include *Methanolobus spp.* and *Prosthecochloris spp.*. There were 432 differentially abundant species between the 0 hour and 72 hour fumigation treatment 174 taxa were enriched in 0 hours; 258 were enriched in 72 hours. We see similar trends in biodiversity reduction at 72 hours that we see with 24 hours; this includes a reduction in *Nostoc spp.*, *Skermanella spp.*, and *Bradyrhizobium spp*. Intrerestingly, there were NO differentially abundant taxa between 24 hours and 72 hours. This indicates that the most significant amount of biodiversity reduction occurred after 24 hours of fumigation; additional fumigation time up to 72 hours did not significantly impact diazotroph biodiversity or differential abundance. </div>
+

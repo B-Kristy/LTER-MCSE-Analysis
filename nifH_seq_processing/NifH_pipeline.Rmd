@@ -8,15 +8,8 @@ date: "2023-04-14"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{bash}
-#load anaconda
-module load Conda/3
-#activate qiime2
-conda activate qiime2-2023.2
-```
-
 ```{seq visualization w QIIME2}
-Import demultiplexed sequences into .qza artifact for QIIME2-related scripts:
+#Import demultiplexed sequences into .qza artifact for QIIME2-related scripts:
 cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250/
 
 qiime tools import 
@@ -26,7 +19,6 @@ qiime tools import
 --output-path 20230410_Amplicon_KRI13538_PE250.qza \
 
 # Visualize quality of raw, demultiplexed sequences. The .qzv file is available in this repository. 
-
 qiime demux summarize \
 --i-data 20230410_Amplicon_KRI13538_PE250.qza \
 --o-visualization 20230410_Amplicon_KRI13538_PE250_SUMMARY_VIZ.qzv
@@ -82,7 +74,7 @@ awk 'BEGIN{FS="\n";RS=">"};NR>1{print(">"$1);for(i=2;i<=NF;i++){printf($i)};prin
 cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
 
 /mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -fastx_uniques ./merged/merged_reads_filtered_hmm.fa \
--minuniquesize 2 
+-minuniquesize 2 \
 -fastaout ./merged/unique.fa 
 
 # Second, sort unique sequences by length
@@ -104,7 +96,9 @@ eVal_bchX=1e-50
 score_bchX=150
 
 # Translate OTU representative sequences into protein sequences
-/mnt/home/kristybr/anaconda3/pkgs/rdptools-2.0.2-1/bin/FrameBot framebot -N -l 30 -i 0.4 -o ./nifH/ /mnt/home/kristybr/Framebot/refset/nifh_prot_ref.fasta otus.fa 
+/mnt/home/kristybr/anaconda3/pkgs/rdptools-2.0.2-1/bin/FrameBot framebot \
+-N -l 30 -i 0.4 \
+-o ./nifH/ /mnt/home/kristybr/Framebot/refset/nifh_prot_ref.fasta otus.fa 
 ```
 
 ```{Filter out homologous genes (bchL; chlL; bchX; parA) using HMM:}
@@ -117,7 +111,7 @@ cd /mnt/home/kristybr/NifMAP/Resources/
 hmmpress nifH_chlL_bchX.hmm
 
 # Now run hmmscan
-hmmscan --cpu 16  --domtblout hmmOut2.out /mnt/home/kristybr/NifMAP/Resources/nifH_chlL_bchX.hmm ./nifH/_corr_prot.fasta
+hmmscan --cpu 32  --domtblout hmmOut2.out /mnt/home/kristybr/NifMAP/Resources/nifH_chlL_bchX.hmm ./nifH/_corr_prot.fasta
 
 # Filter out homologous sequences
 cat hmmOut2.out | awk 'NR>3{if($8>bitarray[$4]){bitarray[$4]=$8;outArray[$4]=$1"\t"$4}}END{for(entry in outArray){print outArray[entry]}}' > assignments.txt
@@ -129,7 +123,6 @@ grep ">" ./nifH/_corr_nucl.fasta | awk '{print $1}' | grep -v -F -f acceptable_h
 totalOTUs=grep ">" ./nifH/_corr_nucl.fasta | wc -l
 totalAccepted=cat acceptable_hits | wc -l
 totalRemoved=cat shitHits | wc -l
-echo "FRAMEBOT and hmmscreen of nifH removed ${totalRemoved} sequences out of ${totalOTUs} ASVs. ${totalAccepted} ASV reps retained"
 
 
 #mv ${RESULTSFOLDER}/${inputReads} ${WORKFOLDER}/${inputReads}
@@ -142,9 +135,25 @@ cat ${WORKFOLDER}/nifH_corr_prot.fasta | sed 's/ //g' |  awk 'BEGIN{RS=">";FS="\
 cd /mnt/home/kristybr/20230410_Amplicon_KRI13538_PE250
 
 # Make an OTU table based on filter corrected seqs
-/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -otutab ./merged//merged_reads.fa -otus nifH_corr_nucl_only_nifH.fasta -otutabout otu_table.txt -mapout map.txt -threads 16
+/mnt/research/rdp/public/thirdParty/usearch11.0.667_i86linux64 -otutab ./merged/merged_reads_filtered_hmm.fa \
+-otus nifH_corr_nucl_only_nifH.fasta \
+-otutabout otu_table.txt \
+-mapout map.txt \
+-threads 32
+```
 
+```{Assign taxonomy to OTUs}
+# Run kraken2 on representative OTUs
+kraken2 --db /mnt/research/EvansLab/DATABASES/kraken2_db_feb23/ \
+nifH_OTU.fasta \
+--threads 32 \
+--output nifH_taxonomy.output \
+--report nifH_taxonomy_report.txt
 
-
-
+# Reformat Kraken2's output with NCBI taxononmy -- use the nt database. The database MUST have the associated taxDB files. 
+# This will add all taxonomic information based on the NCBI taxid
+python3 /mnt/home/kristybr/CGATMetaSequencing/scripts/translateKraken2.py \
+--krakenout nifH_taxonomy.output \
+--translatedout nifH_taxonomy_reformatted.out \
+--taxdatadir /mnt/research/EvansLab/DATABASES/NCBInt_feb23/
 ```
