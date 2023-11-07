@@ -8,11 +8,10 @@ Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>*3</sup>, Sarah Evans<sup>1,2<
 
 * Full publication is now available here: 
 * Raw sequencing data is available in NCBI's sequence read archive with this link: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1036258
-* 
 * Unfiltered, filtered, and rarefied phyloseq objects are in the 'phyloseq objects'  folder.
-* An R markdown script with all .sbatch scripts for sequence processing is in the 'nifH_seq_processing' folder.
 * Metadata, OTU tables, taxonomy, and the phyloseq objects are in the 'seq_data' folder.
-* Code for statistical analyses and figure generation (including supplemental) are in the 'MCSE_Figures.R' file. 
+* 'NifH_pipeline.Rmd' R markdown file includes all bash processing scripts used to process the raw sequencing data. 
+* 'MCSE_Figures.R' R file includes all R code used to perform statistical analyses and generate manuscript figures. 
 
 
 * If you have any questions or comments, please email Brandon Kristy (kristybr@msu.edu).
