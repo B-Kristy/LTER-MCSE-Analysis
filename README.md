@@ -7,7 +7,7 @@ Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>*3</sup>, Sarah Evans<sup>1,2<
 <sup>3</sup> Department of Plant, Soil, and Microbial Sciences, Michigan State University, 1066 Bogue Street, East Lansing, MI 48824 <br />
 
 * Full publication is now available here: 
-* Raw sequencing data is available in the sequence read archive with this link: 
+* Raw sequencing data is available in the sequence read archive with this link: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1036258
 
 * Unfiltered, filtered, and rarefied phyloseq objects are in the 'phyloseq objects'  folder.
 * An R markdown script with all .sbatch scripts for sequence processing is in the 'nifH_seq_processing' folder.
