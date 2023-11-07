@@ -13,7 +13,7 @@ Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>*3</sup>, Sarah Evans<sup>1,2<
 * An R markdown script with all .sbatch scripts for sequence processing is in the 'nifH_seq_processing' folder.
 * Raw metadata, OTU tables, and taxonomy is in the 'raw_data' folder.
 * Exploratory data analysis is outlined in the 'MCSE_seq.Rmd' file.
-* Statistics and figures from the manuscript are in the 'MCSE_Figures.R' file. 
+* Statistical analyses and figures (including supplemental) from the manuscript are in the 'MCSE_Figures.R' file. 
 
 
 * If you have any questions or comments, please email Brandon Kristy (kristybr@msu.edu).
