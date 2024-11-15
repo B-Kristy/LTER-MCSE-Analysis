@@ -1,6 +1,6 @@
-# Code and data from '[Insert title here]'
+# Code and data from 'Linking diazotroph biodiversity to function under varying land management regimes'
 
-Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>*3</sup>, Sarah Evans<sup>1,2</sup>, and Lisa K. Tiemann<sup>3</sup>
+Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>3</sup>, Sarah Evans<sup>1,2</sup>, and Lisa K. Tiemann<sup>3</sup>
 
 <sup>1</sup> Department of Integrative Biology, Michigan State University, 288 Farm Lane, East Lansing, MI 48824 <br />
 <sup>2</sup> W.K. Kellogg Biological Station, Michigan State University, 3700 E Gull Lake Drive, Hickory Corners, MI 49060 <br />
@@ -12,7 +12,7 @@ Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>*3</sup>, Sarah Evans<sup>1,2<
 * Metadata, OTU, taxonomy, and phyloseq files are in the 'seq_data' folder.
 * 'NifH_pipeline.Rmd' R markdown file includes all bash processing scripts used to process the raw sequencing data.
 * 'MCSE_seq_filtering.R' R file includes all R code used to filter processed sequencing data and generate the phyloseq objects
-* 'MCSE_Figures.R' R file includes all R code used to perform statistical analyses and generate manuscript figures. 
+* 'MCSE_Figures_REVISED.R' R file includes all R code used to perform statistical analyses and generate manuscript figures. 
 
 
 * If you have any questions or comments, please email Brandon Kristy (kristybr@msu.edu).
