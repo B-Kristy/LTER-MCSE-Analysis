@@ -1,4 +1,4 @@
-# Code and data from 'Linking diazotroph biodiversity to function under varying land management regimes'
+# Code and data from 'Reduced soil diazotroph diversity decreases nitrogen fixation rates, but depends on land management'
 
 Brandon Kristy<sup>*1,2</sup>, Jaime Davidson<sup>3</sup>, Sarah Evans<sup>1,2</sup>, and Lisa K. Tiemann<sup>3</sup>
 
